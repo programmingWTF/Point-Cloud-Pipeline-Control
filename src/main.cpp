@@ -7,6 +7,7 @@
 #include <pcl/visualization/pcl_visualizer.h>
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -24,86 +25,131 @@
 namespace fs = std::filesystem;
 
 // ================================================================
-// çº¿ç¨‹å®‰å…¨çš„å¯è§†åŒ–æ•°æ®å®¹å™¨
+// Ïß³Ì°²È«µÄ¿ÉÊÓ»¯Êı¾İÈİÆ÷
 // ================================================================
 struct VisualizerData {
+    struct StageSnapshot {
+        std::string title;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+        pcl::PointCloud<pcl::Normal>::Ptr normals;
+        bool show_normals = false;
+    };
+
     std::mutex mutex;
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_original;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered;
-    pcl::PointCloud<pcl::Normal>::Ptr normals;
+    std::vector<StageSnapshot> stage_snapshots;
     bool should_update = false;
-    bool show_normals = false;
     int normal_display_level = 10;
 
     VisualizerData() {
         cloud_original.reset(new pcl::PointCloud<pcl::PointXYZ>());
-        cloud_filtered.reset(new pcl::PointCloud<pcl::PointXYZ>());
-        normals.reset(new pcl::PointCloud<pcl::Normal>());
     }
 };
 
-// ================================================================
-// PCL å¯è§†åŒ–çº¿ç¨‹å‡½æ•°
-// ================================================================
-void visualizer_thread_func(std::shared_ptr<VisualizerData> vis_data, std::atomic<bool>& keep_running) {
-    pcl::visualization::PCLVisualizer::Ptr viewer(
-        new pcl::visualization::PCLVisualizer("PCL Viewer (Left: Original | Middle: Processed | Right: Normals)"));
+enum class StepType {
+    PassThrough = 0,
+    VoxelGrid,
+    StatisticalOutlier,
+    ShowCloud,
+    ShowNormals,
+};
 
+struct PipelineStepConfig {
+    StepType type = StepType::PassThrough;
+};
+
+const char* step_type_to_label(StepType type) {
+    switch (type) {
+        case StepType::PassThrough:
+            return "Filter: PassThrough";
+        case StepType::VoxelGrid:
+            return "Filter: VoxelGrid";
+        case StepType::StatisticalOutlier:
+            return "Filter: StatisticalOutlier";
+        case StepType::ShowCloud:
+            return "Visualize: Show Cloud";
+        case StepType::ShowNormals:
+            return "Visualize: Compute && Show Normals";
+        default:
+            return "Unknown";
+    }
+}
+
+void build_viewer_scene(const pcl::visualization::PCLVisualizer::Ptr& viewer,
+                        const pcl::PointCloud<pcl::PointXYZ>::Ptr& original,
+                        const std::vector<VisualizerData::StageSnapshot>& snapshots, int normal_display_level) {
     viewer->setBackgroundColor(0.05, 0.05, 0.05);
     viewer->addCoordinateSystem(0.1);
 
-    int v1 = 0, v2 = 0, v3 = 0;
-    viewer->createViewPort(0.0, 0.0, 0.3333, 1.0, v1);
-    viewer->setBackgroundColor(0.05, 0.05, 0.05, v1);
-    viewer->addText("Original", 10, 10, "v1 text", v1);
+    const std::size_t total_views = 1 + snapshots.size();
+    for (std::size_t idx = 0; idx < total_views; ++idx) {
+        int viewport_id = 0;
+        const double left = static_cast<double>(idx) / static_cast<double>(total_views);
+        const double right = static_cast<double>(idx + 1) / static_cast<double>(total_views);
 
-    viewer->createViewPort(0.3333, 0.0, 0.6666, 1.0, v2);
-    viewer->setBackgroundColor(0.08, 0.08, 0.08, v2);
-    viewer->addText("Filtered", 10, 10, "v2 text", v2);
+        viewer->createViewPort(left, 0.0, right, 1.0, viewport_id);
+        viewer->setBackgroundColor(0.07 + 0.03 * static_cast<double>(idx % 3),
+                                   0.07 + 0.03 * static_cast<double>(idx % 3),
+                                   0.07 + 0.03 * static_cast<double>(idx % 3), viewport_id);
 
-    viewer->createViewPort(0.6666, 0.0, 1.0, 1.0, v3);
-    viewer->setBackgroundColor(0.1, 0.1, 0.1, v3);
-    viewer->addText("Filtered & Features", 10, 10, "v3 text", v3);
+        if (idx == 0) {
+            viewer->addText("Original", 10, 10, "title_0", viewport_id);
+            if (original && !original->empty()) {
+                pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> color_orig(original, 255, 255, 255);
+                viewer->addPointCloud<pcl::PointXYZ>(original, color_orig, "cloud_orig", viewport_id);
+                viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "cloud_orig",
+                                                         viewport_id);
+            }
+            continue;
+        }
 
-    bool visualizer_initialized = false;
+        const auto& snapshot = snapshots[idx - 1];
+        std::string title_id = "title_" + std::to_string(idx);
+        std::string cloud_id = "cloud_" + std::to_string(idx);
+        std::string normal_id = "normals_" + std::to_string(idx);
+        viewer->addText(snapshot.title, 10, 10, title_id, viewport_id);
+
+        if (snapshot.cloud && !snapshot.cloud->empty()) {
+            pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> color(snapshot.cloud, 0, 255, 0);
+            viewer->addPointCloud<pcl::PointXYZ>(snapshot.cloud, color, cloud_id, viewport_id);
+            viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, cloud_id,
+                                                     viewport_id);
+        }
+
+        if (snapshot.show_normals && snapshot.cloud && snapshot.normals && !snapshot.normals->empty()) {
+            viewer->addPointCloudNormals<pcl::PointXYZ, pcl::Normal>(
+                snapshot.cloud, snapshot.normals, normal_display_level, 0.05, normal_id, viewport_id);
+        }
+    }
+}
+
+// ================================================================
+// PCL ¿ÉÊÓ»¯Ïß³Ìº¯Êı
+// ================================================================
+void visualizer_thread_func(std::shared_ptr<VisualizerData> vis_data, std::atomic<bool>& keep_running) {
+    pcl::visualization::PCLVisualizer::Ptr viewer(
+        new pcl::visualization::PCLVisualizer("PCL Viewer - Dynamic Pipeline"));
 
     while (keep_running.load() && !viewer->wasStopped()) {
+        bool need_rebuild = false;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr original_copy(new pcl::PointCloud<pcl::PointXYZ>());
+        std::vector<VisualizerData::StageSnapshot> snapshots_copy;
+        int normal_display_level_copy = 10;
+
         {
             std::lock_guard<std::mutex> lock(vis_data->mutex);
-
-            if (!visualizer_initialized && vis_data->cloud_original && !vis_data->cloud_original->empty()) {
-                pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> color_orig(vis_data->cloud_original,
-                                                                                           255, 255, 255);
-                viewer->addPointCloud<pcl::PointXYZ>(vis_data->cloud_original, color_orig, "cloud_orig", v1);
-                viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "cloud_orig",
-                                                         v1);
-                visualizer_initialized = true;
-            }
-
             if (vis_data->should_update) {
-                viewer->removeAllPointClouds(v2);
-                viewer->removeAllPointClouds(v3);
-                viewer->removeAllShapes(v3);
-
-                if (vis_data->cloud_filtered && !vis_data->cloud_filtered->empty()) {
-                    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> color_filt(vis_data->cloud_filtered,
-                                                                                               0, 255, 0);
-                    viewer->addPointCloud<pcl::PointXYZ>(vis_data->cloud_filtered, color_filt, "cloud_filt_v2", v2);
-                    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2,
-                                                             "cloud_filt_v2", v2);
-
-                    viewer->addPointCloud<pcl::PointXYZ>(vis_data->cloud_filtered, color_filt, "cloud_filt_v3", v3);
-                    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2,
-                                                             "cloud_filt_v3", v3);
-
-                    if (vis_data->show_normals && vis_data->normals && !vis_data->normals->empty()) {
-                        viewer->addPointCloudNormals<pcl::PointXYZ, pcl::Normal>(
-                            vis_data->cloud_filtered, vis_data->normals, vis_data->normal_display_level, 0.05,
-                            "normals_v3", v3);
-                    }
-                }
+                original_copy = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*vis_data->cloud_original);
+                snapshots_copy = vis_data->stage_snapshots;
+                normal_display_level_copy = vis_data->normal_display_level;
+                need_rebuild = true;
                 vis_data->should_update = false;
             }
+        }
+
+        if (need_rebuild) {
+            viewer.reset(new pcl::visualization::PCLVisualizer("PCL Viewer - Dynamic Pipeline"));
+            build_viewer_scene(viewer, original_copy, snapshots_copy, normal_display_level_copy);
         }
 
         viewer->spinOnce(10);
@@ -114,17 +160,17 @@ void visualizer_thread_func(std::shared_ptr<VisualizerData> vis_data, std::atomi
 }
 
 // ================================================================
-// é”™è¯¯å›è°ƒ
+// ´íÎó»Øµ÷
 // ================================================================
 static void glfw_error_callback(int error, const char* description) {
-    std::cerr << "Glfw Error " << error << ": " << description << std::endl;
+    std::cerr << "Glfw Error " << error << ": " << description << '\n';
 }
 
 // ================================================================
-// ä¸»å‡½æ•°ï¼šImGui çº¿ç¨‹
+// Ö÷º¯Êı£ºImGui Ïß³Ì
 // ================================================================
 int main(int argc, char** argv) {
-    // åˆå§‹åŒ– GLFW
+    // ³õÊ¼»¯ GLFW
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) return 1;
 
@@ -138,21 +184,21 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    // åˆå§‹åŒ– ImGui
+    // ³õÊ¼»¯ ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // åˆ›å»ºçº¿ç¨‹å®‰å…¨çš„å¯è§†åŒ–æ•°æ®å®¹å™¨
+    // ´´½¨Ïß³Ì°²È«µÄ¿ÉÊÓ»¯Êı¾İÈİÆ÷
     auto vis_data = std::make_shared<VisualizerData>();
     std::atomic<bool> keep_visualizer_running(true);
 
-    // å¯åŠ¨åå°å¯è§†åŒ–çº¿ç¨‹
+    // Æô¶¯ºóÌ¨¿ÉÊÓ»¯Ïß³Ì
     std::thread visualizer_thread(visualizer_thread_func, vis_data, std::ref(keep_visualizer_running));
 
-    // ä¸»çº¿ç¨‹ï¼ˆImGuiï¼‰çš„çŠ¶æ€å˜é‡
+    // Ö÷Ïß³Ì£¨ImGui£©µÄ×´Ì¬±äÁ¿
     std::string current_file = "";
     bool cloud_loaded = false;
 
@@ -160,13 +206,17 @@ int main(int argc, char** argv) {
     float leaf_size = 0.01f;
     int sor_k = 50;
     float sor_std_dev = 1.0f;
-    bool enable_normals = true, enable_curvature = false;
-    int normal_ksearch = 10, curvature_ksearch = 10;
+    int normal_ksearch = 10;
+
+    std::vector<PipelineStepConfig> pipeline_steps = {
+        {StepType::PassThrough},        {StepType::VoxelGrid},   {StepType::ShowCloud},
+        {StepType::StatisticalOutlier}, {StepType::ShowNormals},
+    };
 
     auto logger = std::make_shared<ProcessingLog>("logs/processing_gui.log");
 
     // ================================================================
-    // ImGui ä¸»å¾ªç¯ï¼ˆä¸»çº¿ç¨‹ï¼‰
+    // ImGui Ö÷Ñ­»·£¨Ö÷Ïß³Ì£©
     // ================================================================
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -180,12 +230,12 @@ int main(int argc, char** argv) {
         ImGui::Begin("Pipeline Control Panel", nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-        // ========== æ–‡ä»¶æµè§ˆå™¨ ==========
+        // ========== ÎÄ¼şä¯ÀÀÆ÷ ==========
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "[1] Load Point Cloud");
-        ImGui::Text("Available .pcd, .ply, and .bin files in ./data/:");
+        ImGui::Text("Available .pcd, .ply, and .bin files in ../data/:");
         ImGui::BeginChild("FileBrowser", ImVec2(0, 120), true);
 
-        std::string data_path = "data";
+        std::string data_path = "../data";
         if (fs::exists(data_path) && fs::is_directory(data_path)) {
             for (const auto& entry : fs::directory_iterator(data_path)) {
                 if (entry.path().extension() == ".pcd" || entry.path().extension() == ".ply" ||
@@ -208,73 +258,135 @@ int main(int argc, char** argv) {
                 }
             }
         } else {
-            ImGui::TextColored(ImVec4(1, 0, 0, 1), "ERROR: ./data/ directory not found!");
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), "ERROR: ../data/ directory not found!");
         }
         ImGui::EndChild();
 
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ========== æ»¤æ³¢å™¨é…ç½® ==========
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "[2] Filter Configuration");
+        // ========== ²ÎÊıÅäÖÃ ==========
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "[2] Parameter Configuration");
         ImGui::DragFloatRange2("PassThrough Z Min/Max", &pass_z_min, &pass_z_max, 0.5f, -200.0f, 200.0f);
         ImGui::SliderFloat("VoxelGrid Leaf Size", &leaf_size, 0.001f, 0.5f, "%.3f m");
         ImGui::SliderInt("StatOutlier Mean K", &sor_k, 1, 200);
         ImGui::SliderFloat("StatOutlier Std Dev", &sor_std_dev, 0.1f, 5.0f);
+        ImGui::SliderInt("Normal KSearch", &normal_ksearch, 3, 100);
+        ImGui::SliderInt("Normal Display Level", (int*)&vis_data->normal_display_level, 1, 50);
 
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ========== ç‰¹å¾æå–é…ç½® ==========
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "[3] Feature Extraction");
-        ImGui::Checkbox("Calculate & Display Normals", &enable_normals);
-        if (enable_normals) {
-            ImGui::SliderInt("Normal KSearch", &normal_ksearch, 3, 100);
-            ImGui::SliderInt("Normal Display Level", (int*)&vis_data->normal_display_level, 1, 50);
+        // ========== ×Ô¶¨Òå Pipeline ²½Öè ==========
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "[3] Custom Pipeline Steps");
+        ImGui::TextWrapped("Ã¿¸ö Show Cloud / Show Normals ²½Öè¶¼»áÔÚ¿ÉÊÓ»¯´°¿ÚĞÂÔöÒ»¸öÊÓ¿Ú£¬Õ¹Ê¾¸Ã²½ÖèÊ±µÄµãÔÆ½á¹û¡£");
+
+        for (std::size_t i = 0; i < pipeline_steps.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::Separator();
+            ImGui::Text("Step %d", static_cast<int>(i + 1));
+
+            int current_type = static_cast<int>(pipeline_steps[i].type);
+            const char* step_labels[] = {
+                "Filter: PassThrough",
+                "Filter: VoxelGrid",
+                "Filter: StatisticalOutlier",
+                "Visualize: Show Cloud",
+                "Visualize: Compute && Show Normals",
+            };
+            ImGui::SetNextItemWidth(260.0f);
+            ImGui::Combo("Type", &current_type, step_labels, IM_ARRAYSIZE(step_labels));
+            pipeline_steps[i].type = static_cast<StepType>(current_type);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Up") && i > 0) {
+                std::swap(pipeline_steps[i], pipeline_steps[i - 1]);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Down") && i + 1 < pipeline_steps.size()) {
+                std::swap(pipeline_steps[i], pipeline_steps[i + 1]);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete") && pipeline_steps.size() > 1) {
+                pipeline_steps.erase(pipeline_steps.begin() + static_cast<std::ptrdiff_t>(i));
+                ImGui::PopID();
+                break;
+            }
+
+            ImGui::PopID();
         }
-        ImGui::Checkbox("Calculate Curvature", &enable_curvature);
-        if (enable_curvature) {
-            ImGui::SliderInt("Curvature KSearch", &curvature_ksearch, 3, 100);
+
+        if (ImGui::Button("+ Add Step", ImVec2(-1, 30))) {
+            pipeline_steps.push_back({StepType::ShowCloud});
         }
 
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ========== "åº”ç”¨å¹¶åˆ·æ–°"æŒ‰é’® ==========
-        if (ImGui::Button("Apply & Refresh Pipeline", ImVec2(-1, 50)) && cloud_loaded) {
+        // ========== "¼ÆËã²¢Ë¢ĞÂ"°´Å¥ ==========
+        if (ImGui::Button("Compute & Refresh Pipeline", ImVec2(-1, 50)) && cloud_loaded) {
             {
                 std::lock_guard<std::mutex> lock(vis_data->mutex);
 
-                // å¤åˆ¶åŸå§‹ç‚¹äº‘ç”¨äºå¤„ç†
                 auto cloud_to_process = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*vis_data->cloud_original);
 
-                // è£…é…æµæ°´çº¿
-                PointCloudPipeline pipeline(logger);
-                pipeline.addStage(std::make_shared<PassThroughFilter>("z", pass_z_min, pass_z_max));
-                pipeline.addStage(std::make_shared<VoxelGridFilter>(leaf_size));
-                pipeline.addStage(std::make_shared<StatisticalOutlierFilter>(sor_k, sor_std_dev));
+                vis_data->stage_snapshots.clear();
+                int show_count = 0;
 
-                if (enable_normals) {
-                    pipeline.setNormalExtractor(std::make_shared<NormalExtractor>(normal_ksearch, 0.0));
-                }
-                if (enable_curvature) {
-                    pipeline.setCurvatureExtractor(std::make_shared<CurvatureExtractor>(curvature_ksearch, 0.0));
+                for (std::size_t i = 0; i < pipeline_steps.size(); ++i) {
+                    const StepType type = pipeline_steps[i].type;
+
+                    if (type == StepType::PassThrough) {
+                        auto filter = std::make_shared<PassThroughFilter>("z", pass_z_min, pass_z_max);
+                        filter->apply(cloud_to_process);
+                        continue;
+                    }
+
+                    if (type == StepType::VoxelGrid) {
+                        auto filter = std::make_shared<VoxelGridFilter>(leaf_size);
+                        filter->apply(cloud_to_process);
+                        continue;
+                    }
+
+                    if (type == StepType::StatisticalOutlier) {
+                        auto filter = std::make_shared<StatisticalOutlierFilter>(sor_k, sor_std_dev);
+                        filter->apply(cloud_to_process);
+                        continue;
+                    }
+
+                    VisualizerData::StageSnapshot snapshot;
+                    snapshot.cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_to_process);
+                    snapshot.normals.reset(new pcl::PointCloud<pcl::Normal>());
+                    snapshot.show_normals = false;
+
+                    if (type == StepType::ShowCloud) {
+                        ++show_count;
+                        snapshot.title = "View " + std::to_string(show_count) + ": " + step_type_to_label(type);
+                    } else if (type == StepType::ShowNormals) {
+                        ++show_count;
+                        auto normal_extractor = std::make_shared<NormalExtractor>(normal_ksearch, 0.0);
+                        auto normals = normal_extractor->extract(cloud_to_process);
+                        snapshot.normals = normals;
+                        snapshot.show_normals = true;
+                        snapshot.title = "View " + std::to_string(show_count) + ": " + step_type_to_label(type);
+                    }
+
+                    vis_data->stage_snapshots.push_back(snapshot);
                 }
 
-                // æ‰§è¡Œå¤„ç†
-                pipeline.execute(cloud_to_process);
-
-                // å°†ç»“æœä¼ é€’ç»™å¯è§†åŒ–çº¿ç¨‹
-                vis_data->cloud_filtered = cloud_to_process;
-                if (enable_normals) {
-                    vis_data->normals = pipeline.getNormals();
-                    vis_data->show_normals = true;
-                } else {
-                    vis_data->show_normals = false;
+                if (vis_data->stage_snapshots.empty()) {
+                    VisualizerData::StageSnapshot final_snapshot;
+                    final_snapshot.title = "Final Result";
+                    final_snapshot.cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_to_process);
+                    final_snapshot.normals.reset(new pcl::PointCloud<pcl::Normal>());
+                    final_snapshot.show_normals = false;
+                    vis_data->stage_snapshots.push_back(final_snapshot);
                 }
+
                 vis_data->should_update = true;
 
-                std::cout << "[INFO] Pipeline executed. Filtered size: " << cloud_to_process->size() << std::endl;
+                logger->log("CustomPipeline", vis_data->cloud_original->size(), cloud_to_process->size());
+                std::cout << "[INFO] Custom pipeline executed. Final size: " << cloud_to_process->size() << std::endl;
             }
         }
 
@@ -284,7 +396,7 @@ int main(int argc, char** argv) {
 
         ImGui::End();
 
-        // æ¸²æŸ“ ImGui
+        // äÖÈ¾ ImGui
         ImGui::Render();
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
@@ -297,11 +409,11 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    // å…³é—­å¯è§†åŒ–çº¿ç¨‹
+    // ¹Ø±Õ¿ÉÊÓ»¯Ïß³Ì
     keep_visualizer_running = false;
     visualizer_thread.join();
 
-    // æ¸…ç† ImGui
+    // ÇåÀí ImGui
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

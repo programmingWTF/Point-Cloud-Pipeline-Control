@@ -20,9 +20,7 @@ file(GLOB IMGUI_SOURCES
 # 4. 生成可执行文件
 add_executable(${PROJECT_NAME} ${SOURCES} ${IMGUI_SOURCES})
 
-# 5. 配置目标属性: C++17 标准, 头文件目录, 编译定义
-target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
-
+# 5. 配置目标属性
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${IMGUI_DIR}
@@ -30,9 +28,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PCL_INCLUDE_DIRS}
 )
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE ${PCL_DEFINITIONS})
-
-# 6. 链接 PCL 的库文件、OpenGL 以及 GLFW
+# 6. 链接库文件
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${PCL_LIBRARIES}
     OpenGL::GL
