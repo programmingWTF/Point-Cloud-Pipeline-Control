@@ -33,14 +33,14 @@ struct DisplayConfig {
 
     bool show_normals = false;
     int normal_level = 10;
-    float normal_scale = 0.05f;
+    float normal_scale = 0.05F;
 
     bool show_coordinate_axis = false;
-    float axis_scale = 0.10f;
+    float axis_scale = 0.10F;
 
-    float background_r = 0.10f;
-    float background_g = 0.10f;
-    float background_b = 0.10f;
+    float background_r = 0.10F;
+    float background_g = 0.10F;
+    float background_b = 0.10F;
 };
 
 // ================================================================
@@ -68,10 +68,10 @@ struct VisualizerData {
         original_display.color_b = 255;
         original_display.point_size = 2;
         original_display.show_coordinate_axis = true;
-        original_display.axis_scale = 0.12f;
-        original_display.background_r = 0.07f;
-        original_display.background_g = 0.07f;
-        original_display.background_b = 0.07f;
+        original_display.axis_scale = 0.12F;
+        original_display.background_r = 0.07F;
+        original_display.background_g = 0.07F;
+        original_display.background_b = 0.07F;
     }
 };
 
@@ -186,12 +186,12 @@ PipelineStepConfig make_default_step(StepType type) {
     step.display.point_size = 2;
     step.display.show_normals = (type == StepType::ShowNormals);
     step.display.normal_level = 10;
-    step.display.normal_scale = 0.05f;
+    step.display.normal_scale = 0.05F;
     step.display.show_coordinate_axis = false;
-    step.display.axis_scale = 0.10f;
-    step.display.background_r = 0.10f;
-    step.display.background_g = 0.10f;
-    step.display.background_b = 0.10f;
+    step.display.axis_scale = 0.10F;
+    step.display.background_r = 0.10F;
+    step.display.background_g = 0.10F;
+    step.display.background_b = 0.10F;
 
     return step;
 }
@@ -202,23 +202,14 @@ void render_display_config_ui(DisplayConfig& config, bool allow_normals_edit) {
     ImGui::SliderInt("点云颜色 G", &config.color_g, 0, 255);
     ImGui::SliderInt("点云颜色 B", &config.color_b, 0, 255);
 
-    if (allow_normals_edit) {
-        ImGui::Checkbox("显示法矢", &config.show_normals);
-    }
-
-    if (config.show_normals) {
-        ImGui::SliderInt("法矢密度", &config.normal_level, 1, 80);
-        ImGui::SliderFloat("法矢长度", &config.normal_scale, 0.005f, 0.3f, "%.3f");
-    }
-
     ImGui::Checkbox("显示坐标轴", &config.show_coordinate_axis);
     if (config.show_coordinate_axis) {
-        ImGui::SliderFloat("Axis Scale", &config.axis_scale, 0.02f, 1.0f, "%.2f");
+        ImGui::SliderFloat("坐标轴刻度", &config.axis_scale, 0.02F, 1.0F, "%.2F");
     }
 
-    ImGui::SliderFloat("背景颜色 R", &config.background_r, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("背景颜色 G", &config.background_g, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("背景颜色 B", &config.background_b, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("背景颜色 R", &config.background_r, 0.0F, 1.0F, "%.2F");
+    ImGui::SliderFloat("背景颜色 G", &config.background_g, 0.0F, 1.0F, "%.2F");
+    ImGui::SliderFloat("背景颜色 B", &config.background_b, 0.0F, 1.0F, "%.2F");
 }
 
 void build_viewer_scene(const pcl::visualization::PCLVisualizer::Ptr& viewer,
@@ -279,10 +270,12 @@ void build_viewer_scene(const pcl::visualization::PCLVisualizer::Ptr& viewer,
 // PCL 可视化线程函数
 // ================================================================
 void visualizer_thread_func(std::shared_ptr<VisualizerData> vis_data, std::atomic<bool>& keep_running) {
-    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("PCL Viewer - 点云3D视图"));
+    pcl::visualization::PCLVisualizer::Ptr viewer;
 
-    while (keep_running.load() && !viewer->wasStopped()) {
+    while (keep_running.load()) {
+        bool viewer_stopped = (viewer && viewer->wasStopped());
         bool need_rebuild = false;
+
         pcl::PointCloud<pcl::PointXYZ>::Ptr original_copy(new pcl::PointCloud<pcl::PointXYZ>());
         DisplayConfig original_display_copy;
         std::vector<VisualizerData::StageSnapshot> snapshots_copy;
@@ -298,16 +291,26 @@ void visualizer_thread_func(std::shared_ptr<VisualizerData> vis_data, std::atomi
             }
         }
 
-        if (need_rebuild) {
+        // 如果窗口被关闭或需要更新数据，重新创建窗口
+        if (viewer_stopped || (need_rebuild && (!original_copy->empty() || !snapshots_copy.empty()))) {
+            if (viewer) {
+                viewer->close();
+                viewer.reset();
+            }
             viewer.reset(new pcl::visualization::PCLVisualizer("PCL Viewer - 点云3D视图"));
             build_viewer_scene(viewer, original_copy, original_display_copy, snapshots_copy);
         }
 
-        viewer->spinOnce(10);
+        if (viewer && !viewer->wasStopped()) {
+            viewer->spinOnce(10);
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    viewer->close();
+    if (viewer) {
+        viewer->close();
+    }
 }
 
 // ================================================================
@@ -315,6 +318,15 @@ void visualizer_thread_func(std::shared_ptr<VisualizerData> vis_data, std::atomi
 // ================================================================
 static void glfw_error_callback(int error, const char* description) {
     std::cerr << "Glfw Error " << error << ": " << description << '\n';
+}
+
+// 全局变量用于处理窗口关闭确认
+static bool g_request_exit = false;
+
+static void glfw_window_close_callback(GLFWwindow* window) {
+    // 阻止默认关闭，设置标志让 ImGui 显示确认对话框
+    glfwSetWindowShouldClose(window, GLFW_FALSE);
+    g_request_exit = true;
 }
 
 // ================================================================
@@ -334,6 +346,7 @@ int main(int argc, char** argv) {
     GLFWwindow* window = glfwCreateWindow(560, 980, "Point Cloud Pipeline Control", NULL, NULL);
     if (window == NULL) return 1;
 
+    glfwSetWindowCloseCallback(window, glfw_window_close_callback);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -349,10 +362,10 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     if (has_chinese_font) {
-        std::cout << "[INFO] ImGui font loaded: " << font_loaded_path << std::endl;
+        std::cout << "[INFO] ImGui font loaded: " << font_loaded_path << "\n";
     } else {
         std::cout << "[WARN] No Chinese font found in system candidates. GUI text may show '?' for Chinese."
-                  << std::endl;
+                  << "\n";
     }
 
     auto vis_data = std::make_shared<VisualizerData>();
@@ -424,9 +437,9 @@ int main(int argc, char** argv) {
                         vis_data->should_update = true;
                     }
                     std::cout << "[INFO] Loaded " << current_file_name << " (" << cloud->size() << " points)"
-                              << std::endl;
+                              << "\n";
                 } else {
-                    std::cout << "[WARN] Failed to load selected file: " << current_file_path << std::endl;
+                    std::cout << "[WARN] Failed to load selected file: " << current_file_path << "\n";
                 }
             }
         }
@@ -438,13 +451,13 @@ int main(int argc, char** argv) {
         // 2) 流水线自定义区域
         ImGui::SeparatorText("流水线自定义区域");
         ImGui::TextWrapped(
-            "这里可以组合滤波器、曲率计算和显示步骤。每个步骤都有自己的参数，不再使用统一参数。"
+            "这里可以组合滤波器、曲率计算和显示步骤。"
             " 只有显示步骤会新增可视化视口。\n"
-            "步骤支持：PassThrough、VoxelGrid、StatisticalOutlier、Compute Curvature、Show Cloud、Show Normals。");
+            "步骤支持：PassThrough、VoxelGrid、StatisticalOutlier、计算曲率、显示点云、显示法线。");
 
         const char* step_labels[] = {
-            "Filter: PassThrough",        "Filter: VoxelGrid",     "Filter: StatisticalOutlier",
-            "Feature: Compute Curvature", "Visualize: Show Cloud", "Visualize: Show Normals",
+            "滤波：PassThrough", "滤波：VoxelGrid",  "滤波：StatisticalOutlier",
+            "特征：计算曲率",    "可视化：显示点云", "可视化：显示法线",
         };
 
         for (std::size_t i = 0; i < pipeline_steps.size(); ++i) {
@@ -509,7 +522,7 @@ int main(int argc, char** argv) {
         }
 
         // 3) 可视化部分
-        ImGui::SeparatorText("可视化部分");
+        ImGui::SeparatorText("原始点云的可视化部分");
         ImGui::TextWrapped(
             "原始点云固定有一个视口。流水线里每个显示步骤会新增一个视口，并按该步骤中的显示参数渲染"
             "（颜色、点大小、是否显示法线、法线密度/长度、是否显示坐标轴、背景色）。");
@@ -526,7 +539,7 @@ int main(int argc, char** argv) {
         }
         ImGui::Text("预计视口数量：%d（1 个原始 + %d 个显示步骤）", 1 + display_step_count, display_step_count);
 
-        if (ImGui::Button("Compute and Refresh Viewer", ImVec2(-1, 48)) && cloud_loaded) {
+        if (ImGui::Button("计算并刷新视图", ImVec2(-1, 48)) && cloud_loaded) {
             std::lock_guard<std::mutex> lock(vis_data->mutex);
 
             auto cloud_to_process = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*vis_data->cloud_original);
@@ -596,12 +609,7 @@ int main(int argc, char** argv) {
 
             vis_data->should_update = true;
             logger->log("CustomPipeline", vis_data->cloud_original->size(), cloud_to_process->size());
-            std::cout << "[INFO] Pipeline executed. Final size: " << cloud_to_process->size() << std::endl;
-        }
-
-        if (ImGui::Button("Refresh Viewer Only", ImVec2(-1, 34)) && cloud_loaded) {
-            std::lock_guard<std::mutex> lock(vis_data->mutex);
-            vis_data->should_update = true;
+            std::cout << "[INFO] Pipeline executed. Final size: " << cloud_to_process->size() << "\n";
         }
 
         if (!cloud_loaded) {
@@ -609,6 +617,38 @@ int main(int argc, char** argv) {
         }
 
         ImGui::End();
+
+        // 显示关闭确认对话框
+        if (g_request_exit) {
+            ImGui::OpenPopup("关闭确认");
+        }
+
+        if (ImGui::BeginPopupModal("关闭确认", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("确定要关闭流水线控制面板吗？");
+            ImGui::Spacing();
+
+            float button_width = 120.0f;
+            float available_width = ImGui::GetContentRegionAvail().x;
+            float offset = (available_width - 2 * button_width - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
+
+            if (ImGui::Button("确定", ImVec2(button_width, 0))) {
+                g_request_exit = false;
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SetItemDefaultFocus();
+            ImGui::SameLine();
+
+            if (ImGui::Button("取消", ImVec2(button_width, 0))) {
+                g_request_exit = false;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
 
         ImGui::Render();
         int display_w, display_h;
