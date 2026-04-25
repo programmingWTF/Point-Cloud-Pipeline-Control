@@ -415,7 +415,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
-    GLFWwindow* window = glfwCreateWindow(1450, 1500, "Point Cloud Pipeline Control", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(1650, 1500, "Point Cloud Pipeline Control", NULL, NULL);
     if (window == NULL) return 1;
 
     glfwSetWindowCloseCallback(window, glfw_window_close_callback);
